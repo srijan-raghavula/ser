@@ -1,0 +1,45 @@
+Loading Semantic Model: all-MinilM-Lé-v2 (approx 90MB) ...
+modules.json: 100%| [N 349/349 [00:00<00:00, 1.21MB/s]
+config_sentence_transformers.json: 1BB%III 116/116 [00:00<00
+README.md: 10.5kB [00:00, 31.1MB/s]
+sentence_bert_config.json: 1BB%III 53.0/53.0 [00:00<00:00, 9
+config.json: 100%]| | 612/612 [00:00<00:00, 1.01MB/s]
+model.safetensors: 100%|@| 90.9M/90.9M [00:08<00:00, 10.4MB/
+Loading weights: 1BB%III 103/103 [00:00<00:00, 5867.27it/s,
+BertModel LOAD REPORT from: sentence-transformers/all-MinilM-Lé6-v2
+Key | Status |
+———————————————————————— L T L L
+
+embeddings.position_ids | UNEXPECTED | |
+
+Notes:
+
+- UNEXPECTED :can be ignored when loading from different task/architecture; not ok if you expect identical arch.
+tokenizer_config.json: 1BB%III 350/350 [00:00<00:00, 542kB/s
+
+vocab.txt: 232kB [00:00, 2.05MB/s]
+
+tokenizer.json: 466kB [00:00, 7.26MB/s]
+
+special_tokens_map.json: 1BB%III 112/112 [00:00<00:00, 204kB
+
+config.json: 100%| [N 190/190 [00:00<00:00, 221kB/s]
+
+Model Loaded. Ready to scan.
+
+[Test 1] Comparing with: 'Residential building collapse three stories high eastern fire with people trapped'
+
+> Overall SER (Eq 8): 0.1411 (Lower is better)
+
+> Object SER (Egq 18): 1.2560
+
+> Differences: {'collapsed', 'high', 'side', 'people', 'detected', 'collapse', 'on', 'east', 'stories', '3', 'floors', 'civilians', 'with', 'three', 'eastern'}
+
+[Test 2] Comparing with: 'A residential building is under construction 3 floors sunny day'
+
+> Overall SER (Eq 8): 0.6318
+
+> Object SER (Egq 108): 1.1667
+
+> Differences: {'fire', 'under', 'side', 'sunny', 'day', 'collapsed', 'on', 'trapped', 'east', 'construction', ‘'civilians', 'detected', 'a', 'is'}
+
