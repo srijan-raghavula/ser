@@ -2,3 +2,7 @@ numpy
 sentence-transformers
 scikit-learn
 requests
+random
+math
+copy
+functools
