@@ -4,27 +4,35 @@ import re
 import torch
 from copy import deepcopy
 from transformers import AutoModelForCausalLM, AutoTokenizer
+from transformers import BitsAndBytesConfig
 
 # =========================
 # Phase 0: GPU + Model Load
 # =========================
 
+bnb_config = BitsAndBytesConfig(
+            load_in_8bit=True,
+            llm_int8_enable_fp32_cpu_offload=True
+        )
+
 assert torch.cuda.is_available(), "CUDA not available."
 
 device = torch.device("cuda")
-MODEL_NAME = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
+#MODEL_NAME = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
+MODEL_NAME = "microsoft/phi-3-mini-4k-instruct"
 
 tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
 
 model = AutoModelForCausalLM.from_pretrained(
     MODEL_NAME,
-    dtype=torch.float16,
+    quantization_config=bnb_config,
+    #dtype=torch.float16,
     device_map="auto"
 )
 
 model.eval()
 
-def generate(prompt, max_tokens=200):
+def generate(prompt, max_tokens=128):
     inputs = tokenizer(prompt, return_tensors="pt").to(device)
     with torch.no_grad():
         output = model.generate(
