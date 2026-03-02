@@ -5,26 +5,38 @@ from copy import deepcopy
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 # =========================
-# Phase 0: Load Phi-3
+# Phase 0: GPU + Model Load
 # =========================
 
-MODEL_NAME = "microsoft/phi-3-mini-128k-instruct"
+assert torch.cuda.is_available(), "CUDA not available. Fix torch install."
+
+device = torch.device("cuda")
+
+MODEL_NAME = "microsoft/phi-3-mini-4k-instruct"
 
 tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
+
 model = AutoModelForCausalLM.from_pretrained(
     MODEL_NAME,
-    dtype=torch.float16 if torch.cuda.is_available() else torch.float32,
-    device_map="auto"
+    dtype=torch.float16,
+    device_map="auto",
+    low_cpu_mem_usage=True
 )
 
-def phi_generate(prompt, max_tokens=256):
-    inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
-    output = model.generate(
-        **inputs,
-        max_new_tokens=max_tokens,
-        do_sample=True,
-        temperature=0.7
-    )
+model.eval()
+
+def generate(prompt, max_tokens=256):
+    inputs = tokenizer(prompt, return_tensors="pt").to(device)
+
+    with torch.no_grad():
+        output = model.generate(
+            **inputs,
+            max_new_tokens=max_tokens,
+            do_sample=True,
+            temperature=0.7,
+            top_p=0.9
+        )
+
     return tokenizer.decode(output[0], skip_special_tokens=True)
 
 # =========================
@@ -53,64 +65,64 @@ def semantic_source():
         "context": [
             "urban disaster response",
             "evening time",
-            "low visibility"
+            "low visibility due to smoke"
         ]
     }
 
 # =========================
-# Phase 2: Importance Scoring (Phi-3)
+# Phase 2: Batched Importance Scoring
 # =========================
 
-def score_importance(category, element, full_context):
-    prompt = f"""
-You are scoring importance for disaster response.
-
-Full context:
-{full_context}
-
-Element category: {category}
-Element: {element}
-
-Give a single importance score between 0 and 1.
-Only output the number.
-"""
-    response = phi_generate(prompt, max_tokens=20)
-    try:
-        score = float(response.strip().split()[-1])
-        return max(0.0, min(1.0, score))
-    except:
-        return 0.5
-
-def compute_importance(S):
-    context_text = str(S)
-    scored = []
-
+def score_importance_batch(S):
+    flat_elements = []
     for category in S:
         for element in S[category]:
-            score = score_importance(category, element, context_text)
-            scored.append((category, element, score))
+            flat_elements.append((category, element))
 
-    return scored
+    prompt = f"""
+You are ranking semantic importance for disaster response.
+Return JSON list of scores between 0 and 1.
+
+Elements:
+{flat_elements}
+
+Output format:
+[0.95, 0.8, ...]
+Only output JSON list.
+"""
+
+    response = generate(prompt, max_tokens=200)
+
+    try:
+        scores = eval(response.strip())
+        scored = []
+        for i, (cat, elem) in enumerate(flat_elements):
+            score = float(scores[i]) if i < len(scores) else 0.5
+            score = max(0.0, min(1.0, score))
+            scored.append((cat, elem, score))
+        return scored
+    except:
+        return [(cat, elem, 0.5) for cat, elem in flat_elements]
 
 # =========================
-# Phase 3: Greedy SER-per-GB Pruning
+# Phase 3: Greedy Pruning
 # =========================
 
-def prune_semantics(S, scored_elements, max_tokens):
+def prune_semantics(S, scored, max_tokens):
     S_new = deepcopy(S)
-    total_elements = sum(len(v) for v in S.values())
 
-    if total_elements <= max_tokens:
+    total = sum(len(v) for v in S.values())
+    if total <= max_tokens:
         return S_new
 
-    scored_elements.sort(key=lambda x: x[2])  # ascending importance
+    scored.sort(key=lambda x: x[2])
 
-    to_remove = total_elements - max_tokens
+    to_remove = total - max_tokens
 
     for i in range(to_remove):
-        category, element, _ = scored_elements[i]
-        if element in S_new[category]:
-            S_new[category].remove(element)
+        cat, elem, _ = scored[i]
+        if elem in S_new[cat]:
+            S_new[cat].remove(elem)
 
     return S_new
 
@@ -148,34 +160,31 @@ def total_ser(S, S_hat):
     return total
 
 # =========================
-# Phase 6: Self-Consistency Reconstruction
+# Phase 6: Self-Consistency Repair
 # =========================
 
-def reconstruct_with_self_consistency(S_hat, trials=3):
-    best_output = None
-    best_score = float("inf")
+def repair_with_self_consistency(S_hat, trials=3):
+    best = None
+    best_len = float("inf")
 
     for _ in range(trials):
         prompt = f"""
-Reconstruct missing disaster scene details based on:
-
-{S_hat}
-
+Repair missing disaster semantics.
 Return structured JSON-like content.
+
+Input:
+{S_hat}
 """
-        generated = phi_generate(prompt, max_tokens=200)
+        output = generate(prompt, max_tokens=200)
 
-        # simplistic proxy: fewer hallucinated tokens = better
-        score = len(generated)
+        if len(output) < best_len:
+            best_len = len(output)
+            best = output
 
-        if score < best_score:
-            best_score = score
-            best_output = generated
-
-    return best_output
+    return best
 
 # =========================
-# Phase 7: Full Simulation
+# Phase 7: Simulation
 # =========================
 
 def simulate():
@@ -188,8 +197,8 @@ def simulate():
     S = semantic_source()
     print(S)
 
-    print("\n=== IMPORTANCE SCORING (Phi-3) ===")
-    scored = compute_importance(S)
+    print("\n=== IMPORTANCE SCORING (GPU) ===")
+    scored = score_importance_batch(S)
     for item in scored:
         print(item)
 
@@ -202,12 +211,12 @@ def simulate():
     print(S_hat)
 
     print("\n=== SER BEFORE REPAIR ===")
-    ser_value = total_ser(S_pruned, S_hat)
-    print("SER:", ser_value)
+    ser_val = total_ser(S_pruned, S_hat)
+    print("SER:", ser_val)
 
-    print("\n=== SELF-CONSISTENT RECONSTRUCTION ===")
-    reconstructed = reconstruct_with_self_consistency(S_hat)
-    print(reconstructed)
+    print("\n=== SELF-CONSISTENT REPAIR (GPU) ===")
+    repaired = repair_with_self_consistency(S_hat)
+    print(repaired)
 
 # =========================
 # Execution
@@ -215,4 +224,3 @@ def simulate():
 
 if __name__ == "__main__":
     simulate()
-
