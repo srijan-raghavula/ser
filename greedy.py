@@ -1,5 +1,6 @@
 import random
-import math
+import json
+import re
 import torch
 from copy import deepcopy
 from transformers import AutoModelForCausalLM, AutoTokenizer
@@ -8,36 +9,40 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 # Phase 0: GPU + Model Load
 # =========================
 
-assert torch.cuda.is_available(), "CUDA not available. Fix torch install."
+assert torch.cuda.is_available(), "CUDA not available."
 
 device = torch.device("cuda")
-
-MODEL_NAME = "microsoft/phi-3-mini-4k-instruct"
+MODEL_NAME = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
 
 tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
 
 model = AutoModelForCausalLM.from_pretrained(
     MODEL_NAME,
     dtype=torch.float16,
-    device_map="auto",
-    low_cpu_mem_usage=True
+    device_map="auto"
 )
 
 model.eval()
 
-def generate(prompt, max_tokens=256):
+def generate(prompt, max_tokens=200):
     inputs = tokenizer(prompt, return_tensors="pt").to(device)
-
     with torch.no_grad():
         output = model.generate(
             **inputs,
             max_new_tokens=max_tokens,
-            do_sample=True,
-            temperature=0.7,
-            top_p=0.9
+            do_sample=False,
+            temperature=0.0
         )
-
     return tokenizer.decode(output[0], skip_special_tokens=True)
+
+def extract_json_object(text):
+    decoder = json.JSONDecoder()
+    text = text.strip()
+
+    # Find first JSON object properly
+    obj, end = decoder.raw_decode(text[text.find("{"):])
+    return obj
+
 
 # =========================
 # Phase 1: Semantic Source
@@ -70,39 +75,67 @@ def semantic_source():
     }
 
 # =========================
-# Phase 2: Batched Importance Scoring
+# Phase 2: Importance Scoring (LLM Ranking)
 # =========================
 
 def score_importance_batch(S):
-    flat_elements = []
-    for category in S:
-        for element in S[category]:
-            flat_elements.append((category, element))
+    flat = []
+    for cat in S:
+        for elem in S[cat]:
+            flat.append((cat, elem))
+
+    numbered = "\n".join(
+        [f"{i}. [{cat}] {elem}" for i, (cat, elem) in enumerate(flat)]
+    )
 
     prompt = f"""
-You are ranking semantic importance for disaster response.
-Return JSON list of scores between 0 and 1.
+Rank the following items from MOST important to LEAST important
+for emergency rescue decision making.
 
-Elements:
-{flat_elements}
+Return ONLY a comma-separated list of indices.
+Example:
+3,1,0,2
 
-Output format:
-[0.95, 0.8, ...]
-Only output JSON list.
+Items:
+{numbered}
 """
 
-    response = generate(prompt, max_tokens=200)
+    response = generate(prompt, max_tokens=100)
 
-    try:
-        scores = eval(response.strip())
-        scored = []
-        for i, (cat, elem) in enumerate(flat_elements):
-            score = float(scores[i]) if i < len(scores) else 0.5
-            score = max(0.0, min(1.0, score))
-            scored.append((cat, elem, score))
-        return scored
-    except:
-        return [(cat, elem, 0.5) for cat, elem in flat_elements]
+    print("\n=== RAW IMPORTANCE RESPONSE ===")
+    print(response)
+
+    # Extract numeric indices
+    indices = re.findall(r'\d+', response)
+
+    valid = []
+    seen = set()
+
+    for i in indices:
+        idx = int(i)
+        if 0 <= idx < len(flat) and idx not in seen:
+            valid.append(idx)
+            seen.add(idx)
+
+    # Append any missing indices at end (lowest priority)
+    for i in range(len(flat)):
+        if i not in seen:
+            valid.append(i)
+
+    scored = []
+    total = len(flat)
+
+    for rank, idx in enumerate(valid):
+        cat, elem = flat[idx]
+        score = max(0.0, 1.0 - (rank / total))
+        scored.append((cat, elem, score))
+
+    print("\n=== PROCESSED IMPORTANCE SCORES ===")
+    for s in scored:
+        print(s)
+
+    return scored
+
 
 # =========================
 # Phase 3: Greedy Pruning
@@ -116,7 +149,6 @@ def prune_semantics(S, scored, max_tokens):
         return S_new
 
     scored.sort(key=lambda x: x[2])
-
     to_remove = total - max_tokens
 
     for i in range(to_remove):
@@ -127,17 +159,14 @@ def prune_semantics(S, scored, max_tokens):
     return S_new
 
 # =========================
-# Phase 4: Channel Corruption
+# Phase 4: Channel
 # =========================
 
 def corrupt(S, p):
-    S_hat = {}
-    for k in S:
-        S_hat[k] = [x for x in S[k] if random.random() > p]
-    return S_hat
+    return {k: [x for x in S[k] if random.random() > p] for k in S}
 
 # =========================
-# Phase 5: SER Computation
+# Phase 5: SER
 # =========================
 
 def set_ser(original, received):
@@ -153,35 +182,32 @@ def total_ser(S, S_hat):
         "relations": 0.2,
         "context": 0.2
     }
-
     total = 0.0
     for k in S:
         total += weights[k] * set_ser(S[k], S_hat[k])
     return total
 
 # =========================
-# Phase 6: Self-Consistency Repair
+# Phase 6: Repair + Recompute SER
 # =========================
 
-def repair_with_self_consistency(S_hat, trials=3):
-    best = None
-    best_len = float("inf")
-
-    for _ in range(trials):
-        prompt = f"""
-Repair missing disaster semantics.
-Return structured JSON-like content.
+def repair_semantics(S_hat):
+    prompt = f"""
+Repair missing semantics.
+Return ONLY JSON with keys:
+objects, actions, relations, context.
 
 Input:
-{S_hat}
+{json.dumps(S_hat)}
 """
-        output = generate(prompt, max_tokens=200)
 
-        if len(output) < best_len:
-            best_len = len(output)
-            best = output
+    response = generate(prompt)
 
-    return best
+    print("\n=== RAW REPAIR RESPONSE ===")
+    print(response)
+
+    repaired = extract_json_object(response)
+    return repaired
 
 # =========================
 # Phase 7: Simulation
@@ -189,38 +215,40 @@ Input:
 
 def simulate():
     random.seed(42)
-
     bandwidth_limit_tokens = 8
     corruption_p = 0.2
 
-    print("\n=== ORIGINAL SEMANTICS ===")
+    print("\n=== ORIGINAL ===")
     S = semantic_source()
-    print(S)
+    print(json.dumps(S, indent=2))
 
-    print("\n=== IMPORTANCE SCORING (GPU) ===")
     scored = score_importance_batch(S)
-    for item in scored:
-        print(item)
 
-    print("\n=== GREEDY PRUNED SEMANTICS ===")
+    print("\n=== SCORED ELEMENTS ===")
+    for s in scored:
+        print(s)
+
     S_pruned = prune_semantics(S, scored, bandwidth_limit_tokens)
-    print(S_pruned)
+
+    print("\n=== PRUNED ===")
+    print(json.dumps(S_pruned, indent=2))
+
+    S_hat = corrupt(S_pruned, corruption_p)
 
     print("\n=== CHANNEL OUTPUT ===")
-    S_hat = corrupt(S_pruned, corruption_p)
-    print(S_hat)
+    print(json.dumps(S_hat, indent=2))
 
-    print("\n=== SER BEFORE REPAIR ===")
-    ser_val = total_ser(S_pruned, S_hat)
-    print("SER:", ser_val)
+    ser_before = total_ser(S_pruned, S_hat)
+    print("\nSER BEFORE REPAIR:", ser_before)
 
-    print("\n=== SELF-CONSISTENT REPAIR (GPU) ===")
-    repaired = repair_with_self_consistency(S_hat)
-    print(repaired)
+    S_repaired = repair_semantics(S_hat)
 
-# =========================
-# Execution
-# =========================
+    print("\n=== REPAIRED STRUCTURE ===")
+    print(json.dumps(S_repaired, indent=2))
+
+    ser_after = total_ser(S_pruned, S_repaired)
+    print("\nSER AFTER REPAIR:", ser_after)
 
 if __name__ == "__main__":
     simulate()
+
